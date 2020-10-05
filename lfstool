@@ -1,0 +1,134 @@
+#!/usr/bin/python3
+
+import shutil
+import sys
+import subprocess
+import os
+import getpass
+import argparse
+import re
+import math
+
+cwd = os.getcwd()
+cwd_pools = {}
+file_system_name = None
+user_name = getpass.getuser()
+units = {"B": 1, "KB": 2 ** 10, "MB": 2 ** 20, "GB": 2 ** 30, "TB": 2 ** 40}
+du_header = str.ljust("DEVICE", 20, " ") + str.ljust(" CAPACITY", 12, " ") + str.ljust(" FILES", 12, " ")
+
+
+def human_to_byte(size):
+    size = size.upper()
+    if not re.match(r' ', size):
+        size = re.sub(r'([KMGT]?B)', r' \1', size)
+    number, unit = [string.strip() for string in size.split()]
+    return int(float(number) * units[unit])
+
+
+def byte_to_human(size):
+    size = abs(size)
+    if size == 0:
+        return "0 B"
+    p = int(math.floor(math.log(size, 2) / 10))
+    return "%0.2f %s" % (size / math.pow(1024, p), ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB', 'YiB'][p])
+
+
+def run_command(cmd):
+    command = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if command.returncode != 0:
+        print("ERROR:", "\n", str(command.stderr))
+        sys.exit(1)
+    else:
+        return command.stdout
+
+
+def check_if_executable_exist(path):
+    if shutil.which(path):
+        return True
+    else:
+        print("ERROR: Cannot find", path, "executable!")
+        sys.exit(1)
+
+
+def get_filesystem_name():
+    lfs_getname = run_command(["lfs", "getname", cwd])
+    global file_system_name
+    file_system_name = str.split(str(lfs_getname), "-")[0]
+
+
+def get_pools_cwd():
+    lustre_pools = run_command(["lfs", "pool_list", cwd])
+    global cwd_pools
+    pool_list = str.splitlines(lustre_pools, keepends=False)[2:]
+    for index, entry in enumerate(pool_list):
+        # to deal with LU-11881, we have to check if a false flag/error message is in the lfs output
+        if "error" in entry.lower():
+            continue
+        else:
+            # noinspection PyUnresolvedReferences
+            pool = file_system_name + "." + str.split(entry, ".")[-1]
+            lfs_pool_list = run_command(["lfs", "pool_list", pool])
+            ost_list = str.splitlines(lfs_pool_list, keepends=False)[1:]
+            cwd_pools[pool] = ost_list
+
+
+def lfs_du():
+    lfs_quota = run_command(["lfs", "quota", "-u", user_name, "-v", cwd])
+    lfs_quota_lines = str.split(lfs_quota, "\n")[3:-4]
+    total_du = lfs_quota_lines[0]
+    lfs_quota_lines = lfs_quota_lines[1:]
+    device_du = []
+    for i in range(0, len(lfs_quota_lines), 2):
+        device_du.append(lfs_quota_lines[i] + lfs_quota_lines[i + 1])
+    print("User:\t\t", user_name)
+    print("Filesystem:\t", file_system_name)
+    print("Path:\t\t", cwd)
+    print(du_header)
+    for line in device_du:
+        du = str.split(line)
+        print(str.ljust(str.split(du[0], "_")[0], 20, " "),
+              str.ljust(byte_to_human(int(du[1]) * 1024), 12, " "),
+              str.ljust(du[5], 12, " "))
+    print(str.ljust("FS Total", 20, " "),
+          str.ljust(byte_to_human(int(str.split(total_du)[0]) * 1024), 12, " "),
+          str.ljust(str.split(total_du)[4], 12, " "))
+
+
+def pool_du(pools):
+    for pool in pools:
+        print("\nPool usage details:", pool)
+        print(du_header)
+        pool_capacity = 0
+        pool_files = 0
+        for ost in pools[pool]:
+            lfs_quota = run_command(["lfs", "quota", "-u", user_name, cwd, "-o", ost])
+            du = str.splitlines(str(lfs_quota), keepends=False)[2:]
+            du = str.split(du[0])
+            print(str.ljust(str.split(ost, "_")[0], 20, " "),
+                  str.ljust(byte_to_human(int(du[0]) * 1024), 12, " "),
+                  str.ljust(du[4], 12, " "))
+            pool_capacity = pool_capacity + int(du[0]) * 1024
+            pool_files = pool_files + int(du[4])
+        print(str.ljust("Pool Total", 20, " "), str.ljust(byte_to_human(pool_capacity), 12, " "),
+              str.ljust(str(pool_files), 12, " "))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='lfstool, show users Lustre filesystem and pool resource utilisation.')
+    parser.add_argument('-p', '--path', type=str, default="",
+                        help='Lustre filesystem path to be analyzed. Default is the current working directory')
+    parser.add_argument('-u', '--user', type=str, default="",
+                        help='User name or user id to be used for the look-up.')
+    parser.add_argument('-P', '--pool-usage', action="store_true",
+                        help='Show users pool usage details.')
+    args = parser.parse_args()
+    if args.path:
+        cwd = args.path
+    if args.user:
+        user_name = args.user
+    check_if_executable_exist("lfs")
+    get_filesystem_name()
+    lfs_du()
+    get_pools_cwd()
+    if args.pool_usage:
+        pool_du(cwd_pools)
