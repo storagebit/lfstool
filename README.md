@@ -1,2 +1,2 @@
 # lfstool
-Show users Lustre filesystem and pool resource utilisation in human readable format.
+Show users Lustre filesystem and pool resource utilization in a human-readable format.
